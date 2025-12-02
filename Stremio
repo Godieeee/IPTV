@@ -1,0 +1,283 @@
+// Stremio Xtream VOD Addon (auto) - Node.js
+// Files included in this single file: package.json, manifest.json, index.js, README.md
+
+/* ===== package.json =====
+{
+  "name": "stremio-xtream-addon",
+  "version": "1.0.0",
+  "description": "Stremio addon that exposes VOD (movies & series) from an Xtream API IPTV subscription",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "node-fetch": "^2.6.7",
+    "stremio-addon-sdk": "^1.0.0"
+  }
+}
+*/
+
+/* ===== manifest.json =====
+{
+  "id": "org.xtream.vod",
+  "version": "1.0.0",
+  "name": "Xtream VOD (auto)",
+  "description": "Expose your Xtream VOD (movies + series) as a Stremio addon.",
+  "resources": ["catalog", "meta", "stream", "manifest"],
+  "types": ["movie", "series"],
+  "catalogs": [
+    {"type": "movie", "id": "xtream-movies"},
+    {"type": "series", "id": "xtream-series"}
+  ],
+  "idPrefixes": ["xtream:"]
+}
+*/
+
+/* ===== README.md =====
+Quick start:
+1) Put your Xtream credentials below (HOST, USERNAME, PASSWORD)
+2) npm install
+3) node index.js
+4) In Stremio: Add-on -> Add from URL -> http://localhost:7000/manifest.json
+
+Notes:
+- This addon tries the Xtream "player_api.php" endpoints (get_vod_streams, get_series)
+  and falls back to parsing the m3u (get.php?type=m3u_plus&output=hls) if needed.
+- If some metadata is missing, Stremio will still be able to play the stream links.
+*/
+
+/* ===== index.js ===== */
+const { addonBuilder } = require('stremio-addon-sdk');
+const fetch = require('node-fetch');
+
+// ====== CONFIG (remplace les valeurs ci-dessous par les tiennes) ======
+const X_HOST = 'http://ontv4tv.net:80';
+const X_USERNAME = '942766655593335';
+const X_PASSWORD = '1593574628';
+// ======================================================================
+
+const builder = new addonBuilder({
+  id: 'org.xtream.vod',
+  version: '1.0.0',
+  name: 'Xtream VOD (auto)'
+});
+
+// Helper: try to parse JSON response safely
+async function fetchJson(url) {
+  const res = await fetch(url);
+  const text = await res.text();
+  try { return JSON.parse(text); } catch (e) { return text; }
+}
+
+// 1) Try Xtream player_api for VOD streams
+async function getVodStreams() {
+  const url = `${X_HOST}/player_api.php?username=${X_USERNAME}&password=${X_PASSWORD}&action=get_vod_streams`;
+  try {
+    const data = await fetchJson(url);
+    if (Array.isArray(data)) return data; // expected array of VOD objects
+  } catch (e) {}
+  return null;
+}
+
+// 2) Try Xtream player_api for series list
+async function getSeriesList() {
+  const url = `${X_HOST}/player_api.php?username=${X_USERNAME}&password=${X_PASSWORD}&action=get_series`;
+  try {
+    const data = await fetchJson(url);
+    if (Array.isArray(data)) return data; // expected array of series objects
+  } catch (e) {}
+  return null;
+}
+
+// 3) Fallback: fetch m3u_plus and parse entries
+async function fetchM3U() {
+  const url = `${X_HOST}/get.php?username=${X_USERNAME}&password=${X_PASSWORD}&type=m3u_plus&output=hls`;
+  try {
+    const res = await fetch(url);
+    const text = await res.text();
+    // Split lines and take pairs of #EXTINF + url
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const items = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith('#EXTINF')) {
+        const title = lines[i].split(',').slice(1).join(',').trim() || 'Unknown';
+        const url = lines[i+1] || '';
+        items.push({title, url});
+      }
+    }
+    return items;
+  } catch (e) { return []; }
+}
+
+// Build movie catalog
+builder.defineCatalogHandler(async function(args, cb) {
+  try {
+    if (args.type === 'movie') {
+      const vod = await getVodStreams();
+      let metas = [];
+      if (vod && vod.length) {
+        metas = vod.map(v => ({
+          id: `xtream:movie:${v.stream_id || v.movie_id || v.id || v.vid || v.id_vod}`,
+          type: 'movie',
+          name: v.name || v.title || v.stream_name || v.name_movie || 'Unknown',
+          poster: v.info ? v.info.movie_image : (v.stream_icon || undefined),
+          posterShape: 'poster'
+        }));
+      } else {
+        // fallback to M3U
+        const m3u = await fetchM3U();
+        metas = m3u.map((it, idx) => ({
+          id: `xtream:movie:m3u_${idx}`,
+          type: 'movie',
+          name: it.title || `Item ${idx+1}`,
+          posterShape: 'poster'
+        }));
+      }
+      cb(null, { metas });
+    } else if (args.type === 'series') {
+      const series = await getSeriesList();
+      let metas = [];
+      if (series && series.length) {
+        metas = series.map(s => ({
+          id: `xtream:series:${s.series_id || s.id || s.sid}`,
+          type: 'series',
+          name: s.name || s.series_name || s.title || 'Unknown',
+          poster: s.info ? s.info.series_image : (s.stream_icon || undefined),
+          posterShape: 'poster'
+        }));
+      } else {
+        // If no series endpoint, try to parse M3U and return items as pseudo-series
+        const m3u = await fetchM3U();
+        metas = m3u.map((it, idx) => ({
+          id: `xtream:series:m3u_${idx}`,
+          type: 'series',
+          name: it.title || `Item ${idx+1}`,
+          posterShape: 'poster'
+        }));
+      }
+      cb(null, { metas });
+    } else {
+      cb(null, { metas: [] });
+    }
+  } catch (err) {
+    cb(err.message);
+  }
+});
+
+// Meta handler: return detailed metadata + episodes if series
+builder.defineMetaHandler(async function(args, cb) {
+  try {
+    const id = args.id || '';
+    if (id.startsWith('xtream:movie:')) {
+      // try to fetch info via player_api.php?action=get_vod_info&vod_id=ID
+      const parts = id.split(':');
+      const vid = parts[2];
+      // try multiple possible query params
+      let info = null;
+      try {
+        const url = `${X_HOST}/player_api.php?username=${X_USERNAME}&password=${X_PASSWORD}&action=get_vod_info&vod_id=${vid}`;
+        const data = await fetchJson(url);
+        if (data && typeof data === 'object') info = data;
+      } catch(e){}
+
+      const meta = {
+        id,
+        type: 'movie',
+        name: (info && (info.name || info.title)) || `Movie ${vid}`,
+        description: info && (info.info ? info.info.plot : info.plot) || undefined,
+        poster: info && (info.info ? info.info.cover : undefined)
+      };
+      cb(null, { meta });
+    } else if (id.startsWith('xtream:series:')) {
+      const parts = id.split(':');
+      const sid = parts[2];
+      // Try get_series_info
+      let info = null;
+      try {
+        const url = `${X_HOST}/player_api.php?username=${X_USERNAME}&password=${X_PASSWORD}&action=get_series_info&series_id=${sid}`;
+        const data = await fetchJson(url);
+        if (data && typeof data === 'object') info = data;
+      } catch(e){}
+
+      // Build episodes list if possible
+      const meta = {
+        id,
+        type: 'series',
+        name: (info && info.name) || `Series ${sid}`,
+        description: info && info.info ? info.info.plot : undefined,
+        poster: info && info.info ? info.info.image : undefined
+      };
+      cb(null, { meta });
+    } else {
+      cb(null, { meta: null });
+    }
+  } catch (err) {
+    cb(err.message);
+  }
+});
+
+// Stream handler: return playable streams
+builder.defineStreamHandler(async function(args, cb) {
+  try {
+    const id = args.id || '';
+    if (id.startsWith('xtream:movie:')) {
+      const vid = id.split(':')[2];
+      // Common Xtream direct movie URL form
+      const url1 = `${X_HOST}/movie/${X_USERNAME}/${X_PASSWORD}/${vid}.mp4`;
+      const url2 = `${X_HOST}/movie/${X_USERNAME}/${X_PASSWORD}/${vid}.m3u8`;
+      // Return both as options
+      const streams = [];
+      streams.push({ title: 'Direct (mp4)', url: url1 });
+      streams.push({ title: 'HLS (m3u8)', url: url2 });
+      cb(null, { streams });
+    } else if (id.startsWith('xtream:series:')) {
+      const sid = id.split(':')[2];
+      // For series we don't know episode ID here; try fetching series info to list episodes
+      // Many Xtream setups use episode IDs in the series info response; we will try to fetch that and return the first episode as example
+      try {
+        const url = `${X_HOST}/player_api.php?username=${X_USERNAME}&password=${X_PASSWORD}&action=get_series_info&series_id=${sid}`;
+        const info = await fetchJson(url);
+        if (info && info.episodes && info.episodes.length) {
+          // pick first episode
+          const ep = info.episodes[0];
+          const epId = ep.episode_id || ep.stream_id || ep.id;
+          const streamUrl = `${X_HOST}/series/${X_USERNAME}/${X_PASSWORD}/${epId}.mp4`;
+          cb(null, { streams: [{ title: `S:${ep.season} E:${ep.episode}`, url: streamUrl }] });
+          return;
+        }
+      } catch(e){}
+      // Fallback: can't determine episode, return nothing
+      cb(null, { streams: [] });
+    } else {
+      cb(null, { streams: [] });
+    }
+  } catch (err) {
+    cb(err.message);
+  }
+});
+
+// Serve manifest.json on /manifest.json
+const manifest = {
+  id: 'org.xtream.vod',
+  version: '1.0.0',
+  name: 'Xtream VOD (auto)',
+  description: 'Expose your Xtream VOD (movies + series) as a Stremio addon.',
+  resources: ['catalog', 'meta', 'stream', 'manifest'],
+  types: ['movie','series'],
+  catalogs: [ { type: 'movie', id: 'xtream-movies' }, { type: 'series', id: 'xtream-series' } ],
+  idPrefixes: ['xtream:']
+};
+
+builder.defineRouter(app => {
+  app.get('/manifest.json', (req, res) => res.json(manifest));
+});
+
+// Start the addon
+const addon = builder.getInterface();
+const express = require('express');
+const app = express();
+app.use('/', addon);
+const PORT = 7000;
+app.listen(PORT, () => console.log(`Xtream Stremio addon running on http://localhost:${PORT}/manifest.json`));
+
+// End of file
