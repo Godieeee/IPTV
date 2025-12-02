@@ -12,7 +12,7 @@ const builder = new addonBuilder({
     id: 'org.xtream.vod.fixed',
     version: '1.0.1',
     name: 'Xtream VOD (Fixé)',
-    resources: ["catalog", "meta", "stream", "manifest"],
+    resources: ["catalog", "meta", "stream"],
     types: ["movie", "series"],
     catalogs: [
         { type: 'movie', id: 'xtream-movies' },
