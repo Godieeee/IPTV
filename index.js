@@ -307,4 +307,4 @@ builder.defineStreamHandler(async function(args, cb) {
 // Le SDK gère le manifeste et le routing automatiquement avec la fonction 'serveHTTP'
 // Plus besoin de définir un router Express manuel pour le manifeste.
 
-serveHTTP(builder.get "}
+serveHTTP(builder.getInterface());
